@@ -18,6 +18,13 @@ SonAI is a professional Android application designed to enhance concentration, r
 - **Independent Controls**: Audio playback and AI-powered Smart Focus can be controlled independently. You can enjoy manual background sounds with the microphone completely off, or activate "Auto (AI)" for intelligent environment adaptation.
 - **WearOS Support**: Control your Focus Zone directly from your wrist with a dedicated smartwatch interface.
 - **Modern UI**: Built with Jetpack Compose (Material 3) featuring real-time decibel waveform visualization.
+
+## 📱 Screenshots
+
+| Light Mode | Dark Mode |
+|------------|-----------|
+| ![Light Mode](screenshots/light_mode.png) | ![Dark Mode](screenshots/dark_mode.png) |
+
 - **Global Reach**: Fully localized in English, Italian, Spanish, French, German, Russian, Chinese (Simplified), and Japanese.
 - **Privacy First**: Local on-device analysis only. Microphone is only active when "Auto (AI)" is selected. No audio data is ever recorded, stored, or transmitted.
 
