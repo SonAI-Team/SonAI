@@ -54,25 +54,26 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun WearApp() {
     val context = LocalContext.current
-    val heartRateMonitor = remember { HeartRateMonitor(context) }
     val commManager = remember { WearCommunicationManager(context) }
+    val isPlaying = rememberSoundAnalysisState(context, commManager)
+    val heartRate = rememberHeartRate(context, commManager)
 
+    MaterialTheme {
+        WearMainScaffold(heartRate, isPlaying, commManager)
+    }
+}
+
+@Composable
+private fun rememberSoundAnalysisState(
+    context: android.content.Context,
+    commManager: WearCommunicationManager
+): Boolean {
     var isPlaying by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    // Request current status on startup
-    LaunchedEffect(Unit) {
-        scope.launch {
-            commManager.sendCommand("GET_STATUS")
-        }
-    }
-
     val statusReceiver = remember {
         object : android.content.BroadcastReceiver() {
-            override fun onReceive(
-                context: android.content.Context?,
-                intent: android.content.Intent?
-            ) {
+            override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
                 val status = intent?.getStringExtra("status")
                 isPlaying = (status == "PLAYING")
             }
@@ -80,19 +81,27 @@ fun WearApp() {
     }
 
     LaunchedEffect(Unit) {
-        val flags =
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                android.content.Context.RECEIVER_NOT_EXPORTED
-            } else {
-                0
-            }
+        val flags = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            android.content.Context.RECEIVER_NOT_EXPORTED
+        } else {
+            0
+        }
         context.registerReceiver(
             statusReceiver,
             android.content.IntentFilter("SoundAnalysisStatus"),
             flags
         )
+        scope.launch { commManager.sendCommand("GET_STATUS") }
     }
+    return isPlaying
+}
 
+@Composable
+private fun rememberHeartRate(
+    context: android.content.Context,
+    commManager: WearCommunicationManager
+): Int? {
+    val heartRateMonitor = remember { HeartRateMonitor(context) }
     var permissionGranted by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(
@@ -104,9 +113,7 @@ fun WearApp() {
 
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        permissionGranted = isGranted
-    }
+    ) { isGranted -> permissionGranted = isGranted }
 
     LaunchedEffect(Unit) {
         if (!permissionGranted) {
@@ -121,14 +128,9 @@ fun WearApp() {
     }
 
     LaunchedEffect(heartRate) {
-        heartRate?.let {
-            commManager.sendHeartRate(it)
-        }
+        heartRate?.let { commManager.sendHeartRate(it) }
     }
-
-    MaterialTheme {
-        WearMainScaffold(heartRate, isPlaying, commManager)
-    }
+    return heartRate
 }
 
 @Composable
