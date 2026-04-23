@@ -35,7 +35,11 @@ SonAI is a professional Android application designed to enhance concentration, r
 - **Audio Engine**: Procedural synthesis via `AudioTrack` (PCM 16-bit, 44.1kHz)
 - **Minimum SDK**: 30 (Android 11)
 - **Target SDK**: 37 (Android 17)
-- **Build System**: Gradle 9.1.1 (Kotlin DSL)
+- **Build System**: Gradle 9.2.0 (Kotlin DSL)
+
+### Code Quality & Maintenance
+- **Static Analysis**: [Detekt](https://detekt.dev/) for Kotlin code smell detection and style consistency.
+- **Memory Management**: [LeakCanary](https://square.github.io/leakcanary/) (debug only) for automatic memory leak detection.
 
 ## 📂 Project Structure
 

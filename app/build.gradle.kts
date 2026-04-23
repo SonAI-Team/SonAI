@@ -93,6 +93,7 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     
     debugImplementation(libs.androidx.ui.tooling)
+    debugImplementation(libs.leakcanary.android)
 
     // Junit test suite
     testImplementation(libs.junit.jupiter.api)

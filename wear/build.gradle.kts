@@ -1,5 +1,5 @@
-import java.util.Properties
 import java.io.FileInputStream
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
@@ -28,7 +28,8 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.scardracs.sonai" // Same ID as phone app for Play Store association
+        // Same ID as phone app for Play Store association
+        applicationId = "com.scardracs.sonai"
         minSdk = 30
         targetSdk = 37
         versionCode = 1
@@ -40,7 +41,10 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             signingConfig = signingConfigs.getByName("release")
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
     compileOptions {
@@ -54,7 +58,7 @@ android {
 
 dependencies {
     implementation(libs.androidx.core.ktx)
-    
+
     // Firebase
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.crashlytics)
@@ -67,4 +71,7 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material.icons.extended)
+
+    // Check for memory leaks on debug mode
+    debugImplementation(libs.leakcanary.android)
 }

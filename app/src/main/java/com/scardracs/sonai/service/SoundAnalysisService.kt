@@ -11,8 +11,9 @@ import android.content.pm.ServiceInfo
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder.AudioSource
-import android.util.Log
 import android.os.Build
+import android.util.Log
+import androidx.annotation.RequiresPermission
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
@@ -29,15 +30,25 @@ import kotlin.math.sqrt
 
 class SoundAnalysisService : LifecycleService() {
 
+    data class AnalysisUpdate(
+        val label: String,
+        val masking: String,
+        val amplitude: Float,
+        val db: Int,
+        val timerSeconds: Int = -1,
+        val isAuto: Boolean = true
+    )
+
     private var audioClassifier: AudioClassifier? = null
     private var timer: Timer? = null
     private lateinit var noiseGenerator: NoiseGenerator
-    
+
     private var isAutoMode = true
     private var manualModes = setOf<NoiseGenerator.NoiseType>()
-    
+
     // Smooth weights for Auto mode transitions
-    private val smoothedWeights = NoiseGenerator.NoiseType.entries.associateWith { 0f }.toMutableMap()
+    private val smoothedWeights =
+        NoiseGenerator.NoiseType.entries.associateWith { 0f }.toMutableMap()
     private val smoothingFactor = 0.2f // Higher = faster, Lower = smoother
 
     companion object {
@@ -47,44 +58,55 @@ class SoundAnalysisService : LifecycleService() {
         private const val MODEL_FILE = "yamnet.tflite"
         private const val ACTION_STOP = "com.scardracs.sonai.ACTION_STOP"
 
+        private const val SAMPLE_RATE = 16000
+        private const val SAMPLE_COUNT = 16000
+        private const val DB_OFFSET = 90.0
+        private const val DB_THRESHOLD_LOW = 35.0
+        private const val DB_RANGE = 40.0
+        private const val VOL_MIN = 0.4f
+        private const val VOL_MAX = 1.0f
+        private const val VOL_MANUAL = 0.7f
+        private const val SCORE_THRESHOLD = 0.15f
+        private const val SECONDS_IN_MINUTE = 60
+        private const val TARGET_DETECTED = 0.9f
+        private const val TARGET_DEFAULT = 0.35f
+        private const val TARGET_BACKGROUND = 0.15f
+        private const val TARGET_MIN = 0.05f
+        private const val AUTO_MODE_THRESHOLD = 0.3f
+        private const val DEFAULT_AMPLITUDE = 0.1f
+        private const val RMS_MULTIPLIER = 10f
+        private const val TIMER_INTERVAL = 1000L
+
         var instance: SoundAnalysisService? = null
             private set
-        
+
         private val IGNORED_LABELS = setOf(
             "White noise", "Pink noise", "Static", "Hiss", "Hum", "Noise"
         )
 
         internal fun getNoiseTypeForLabel(label: String): NoiseGenerator.NoiseType? {
             val l = label.lowercase()
-            return when {
-                // High frequency / Voice / Melodic -> Stellar Wind (Pinkish/Whistle)
-                l.contains("speech") || l.contains("voice") || l.contains("conversation") ||
-                        l.contains("shouting") || l.contains("laughter") || l.contains("music") ||
-                        l.contains("singing") || l.contains("bird") || l.contains("whistle") -> NoiseGenerator.NoiseType.STELLAR_WIND
+            val typeMappings = mapOf(
+                NoiseGenerator.NoiseType.STELLAR_WIND to listOf(
+                    "speech", "voice", "conversation", "shouting", "laughter", "music", "singing", "bird", "whistle"
+                ),
+                NoiseGenerator.NoiseType.EARTH_RUMBLE to listOf(
+                    "tool", "hammer", "drill", "engine", "vacuum", "fan", "air conditioning", "heavy", "truck", "explosion", "thunder"
+                ),
+                NoiseGenerator.NoiseType.RAIN_FOREST to listOf(
+                    "rain", "liquid", "drip", "stream", "river", "forest", "cricket", "insect", "spray"
+                ),
+                NoiseGenerator.NoiseType.OCEAN_WAVES to listOf(
+                    "ocean", "sea", "wave", "beach", "surf"
+                ),
+                NoiseGenerator.NoiseType.DEEP_SPACE to listOf(
+                    "traffic", "car", "wind", "typing", "keyboard", "office", "clink", "cup", "waterfall", "water", "whoosh", "steam"
+                )
+            )
 
-                // Low frequency / Mechanical / Deep -> Earth Rumble (Brown/Rumble)
-                l.contains("tool") || l.contains("hammer") || l.contains("drill") ||
-                        l.contains("engine") || l.contains("vacuum") || l.contains("fan") ||
-                        l.contains("air conditioning") || l.contains("heavy") || l.contains("truck") ||
-                        l.contains("explosion") || l.contains("thunder") -> NoiseGenerator.NoiseType.EARTH_RUMBLE
-
-                // Rain / Splashing / Forest -> Rain Forest
-                l.contains("rain") || l.contains("liquid") || l.contains("drip") ||
-                        l.contains("stream") || l.contains("river") || l.contains("forest") ||
-                        l.contains("cricket") || l.contains("insect") || l.contains("spray") -> NoiseGenerator.NoiseType.RAIN_FOREST
-
-                // Waves / Large water / Coastal -> Ocean Waves
-                l.contains("ocean") || l.contains("sea") || l.contains("wave") ||
-                        l.contains("beach") || l.contains("surf") -> NoiseGenerator.NoiseType.OCEAN_WAVES
-
-                // Urban / Background / Static -> Deep Space (White/Hum)
-                l.contains("traffic") || l.contains("car") || l.contains("wind") ||
-                        l.contains("typing") || l.contains("keyboard") || l.contains("office") ||
-                        l.contains("clink") || l.contains("cup") || l.contains("waterfall") ||
-                        l.contains("water") || l.contains("whoosh") || l.contains("steam") -> NoiseGenerator.NoiseType.DEEP_SPACE
-
-                else -> null
-            }
+            return typeMappings.entries.firstOrNull { (_, keywords) ->
+                keywords.any { l.contains(it) }
+            }?.key
         }
     }
 
@@ -93,7 +115,7 @@ class SoundAnalysisService : LifecycleService() {
         instance = this
         createNotificationChannel()
         noiseGenerator = NoiseGenerator()
-        
+
         val notification = createNotification(getString(R.string.initializing))
         startForeground(
             NOTIFICATION_ID,
@@ -105,24 +127,24 @@ class SoundAnalysisService : LifecycleService() {
             val baseOptions = BaseOptions.builder()
                 .setModelAssetPath(MODEL_FILE)
                 .build()
-            
+
             val options = AudioClassifier.AudioClassifierOptions.builder()
                 .setBaseOptions(baseOptions)
-                .setScoreThreshold(0.1f)
+                .setScoreThreshold(DEFAULT_AMPLITUDE)
                 .setMaxResults(5)
                 .build()
-            
+
             audioClassifier = AudioClassifier.createFromOptions(this, options)
             startAnalysis()
-        } catch (e: Exception) {
+        } catch (e: IllegalStateException) {
             Log.e(TAG, "Failed to initialize MediaPipe AudioClassifier", e)
-            updateNotification(getString(R.string.error_msg, e.localizedMessage))
+            updateNotification(getString(R.string.error_msg, e.localizedMessage ?: "Unknown error"))
         }
     }
 
     private var audioRecord: AudioRecord? = null
     private var isAnalysisRunning = false
-    
+
     private var remainingSeconds = -1
     private var timerCountdown: Timer? = null
 
@@ -131,10 +153,10 @@ class SoundAnalysisService : LifecycleService() {
             stopSelf()
             return START_NOT_STICKY
         }
-        
+
         val modes = intent?.getStringArrayExtra("EXTRA_MODES")
         val timerMinutes = intent?.getIntExtra("EXTRA_TIMER", -1) ?: -1
-        
+
         if (timerMinutes > 0) {
             startTimer(timerMinutes)
         } else if (timerMinutes == 0) {
@@ -146,8 +168,12 @@ class SoundAnalysisService : LifecycleService() {
                 isAutoMode = true
             } else {
                 isAutoMode = false
-                manualModes = modes.mapNotNull { 
-                    try { NoiseGenerator.NoiseType.valueOf(it) } catch (_: Exception) { null }
+                manualModes = modes.mapNotNull {
+                    try {
+                        NoiseGenerator.NoiseType.valueOf(it)
+                    } catch (_: IllegalArgumentException) {
+                        null
+                    }
                 }.toSet()
                 noiseGenerator.setModes(manualModes)
             }
@@ -164,7 +190,7 @@ class SoundAnalysisService : LifecycleService() {
     }
 
     private fun startTimer(minutes: Int) {
-        remainingSeconds = minutes * 60
+        remainingSeconds = minutes * SECONDS_IN_MINUTE
         timerCountdown?.cancel()
         timerCountdown = Timer()
         timerCountdown?.schedule(object : TimerTask() {
@@ -175,7 +201,7 @@ class SoundAnalysisService : LifecycleService() {
                     stopSelf()
                 }
             }
-        }, 1000, 1000)
+        }, TIMER_INTERVAL, TIMER_INTERVAL)
     }
 
     private fun stopTimer() {
@@ -191,176 +217,193 @@ class SoundAnalysisService : LifecycleService() {
         try {
             audioRecord?.stop()
             audioRecord?.release()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping AudioRecord", e)
+        } catch (_: IllegalStateException) {
+            // Expected if already stopped
         }
         audioRecord = null
-        
+
         // Update UI to show manual masking status
         val modeNames = manualModes.joinToString(", ") { getString(it.resId) }
         updateNotification(getString(R.string.manual_masking, modeNames))
-        sendUpdateToUI("", modeNames, 0.1f, 0, remainingSeconds)
+        sendUpdateToUI(AnalysisUpdate("", modeNames, DEFAULT_AMPLITUDE, 0, remainingSeconds))
     }
 
     private fun startAnalysis() {
         if (isAnalysisRunning) return
-        isAnalysisRunning = true
-        
         val classifier = audioClassifier ?: return
-        val sampleRate = 16000 
-        val sampleCount = 16000
-        
-        val minBufferSize = AudioRecord.getMinBufferSize(
-            sampleRate,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        )
-        val bufferSizeInBytes = maxOf(minBufferSize, sampleCount * 2)
-        
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+
+        if (ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.RECORD_AUDIO
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
             Log.e(TAG, "Permission RECORD_AUDIO not granted")
             return
         }
 
-        val record = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val attributionContext = createAttributionContext("sound_analysis")
-            AudioRecord.Builder()
-                .setAudioSource(AudioSource.MIC)
-                .setAudioFormat(AudioFormat.Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(sampleRate)
-                    .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
-                    .build())
-                .setBufferSizeInBytes(bufferSizeInBytes)
-                .setContext(attributionContext)
-                .build()
-        } else {
-            AudioRecord(
-                AudioSource.MIC,
-                sampleRate,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                bufferSizeInBytes
-            )
-        }
-        
+        val minBufferSize = AudioRecord.getMinBufferSize(
+            SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+        val bufferSizeInBytes = maxOf(minBufferSize, SAMPLE_COUNT * 2)
+
+        val record = createAudioRecord(bufferSizeInBytes)
         if (record.state != AudioRecord.STATE_INITIALIZED) {
             Log.e(TAG, "AudioRecord failed to initialize")
-            isAnalysisRunning = false
             return
         }
 
         audioRecord = record
         try {
             record.startRecording()
+            isAnalysisRunning = true
         } catch (_: IllegalStateException) {
-            isAnalysisRunning = false
             return
         }
 
         timer = Timer()
         timer?.schedule(object : TimerTask() {
             override fun run() {
-                val audioData = AudioData.create(
-                    AudioData.AudioDataFormat.builder()
-                        .setNumOfChannels(1)
-                        .setSampleRate(sampleRate.toFloat())
-                        .build(),
-                    sampleCount
-                )
-                
-                val loadedSamples = audioData.load(record)
-                if (loadedSamples <= 0) return
-
-                // Calculate dB Level from the internal float array
-                val floatArray = audioData.buffer
-                var sum = 0.0
-                for (sample in floatArray) {
-                    sum += (sample.toDouble() * sample.toDouble())
-                }
-                val rms = if (floatArray.size > 0) sqrt(sum / floatArray.size) else 0.0
-                val db = if (rms > 0) 20 * log10(rms) + 90 else 0.0
-
-                val results = classifier.classify(audioData)
-                val allCategories = results.classificationResults().firstOrNull()?.classifications()?.firstOrNull()?.categories()
-                
-                val topResult = allCategories
-                    ?.filter { it.score() > 0.15f }
-                    ?.filterNot { IGNORED_LABELS.contains(it.categoryName()) }
-                    ?.maxByOrNull { it.score() }
-
-                val label = topResult?.categoryName() ?: ""
-                val amplitude = topResult?.score() ?: (rms.toFloat() * 10f).coerceIn(0.1f, 1.0f)
-                
-                Log.d(TAG, "Analysis result - Label: '$label', RMS: $rms, dB: $db")
-
-                // Adaptive Volume Logic: 
-                // Map dB (range ~35 to ~75) to a master volume multiplier (0.4 to 1.0)
-                if (isAutoMode) {
-                    val adaptiveVol = ((db - 35) / 40.0).coerceIn(0.4, 1.0).toFloat()
-                    noiseGenerator.setMasterVolume(adaptiveVol)
-                } else {
-                    noiseGenerator.setMasterVolume(0.7f) // Consistent volume for manual mode
-                }
-
-                val finalModes = if (isAutoMode) {
-                    val suggestion = getNoiseTypeForLabel(label)
-                    
-                    // Target weights based on current detection
-                    val targets = mutableMapOf(
-                        NoiseGenerator.NoiseType.DEEP_SPACE to 0.15f,
-                        NoiseGenerator.NoiseType.STELLAR_WIND to 0.05f,
-                        NoiseGenerator.NoiseType.EARTH_RUMBLE to 0.05f,
-                        NoiseGenerator.NoiseType.RAIN_FOREST to 0.05f,
-                        NoiseGenerator.NoiseType.OCEAN_WAVES to 0.05f
-                    )
-                    
-                    if (suggestion != null) {
-                        targets[suggestion] = 0.9f
-                    } else {
-                        targets[NoiseGenerator.NoiseType.DEEP_SPACE] = 0.35f
-                    }
-
-                    // Apply EMA smoothing to the weights
-                    NoiseGenerator.NoiseType.entries.forEach { type ->
-                        val current = smoothedWeights[type] ?: 0f
-                        val target = targets[type] ?: 0f
-                        smoothedWeights[type] = (target * smoothingFactor) + (current * (1f - smoothingFactor))
-                    }
-                    
-                    noiseGenerator.setWeightedModes(smoothedWeights)
-                    
-                    // Show dominant modes in UI based on smoothed values
-                    smoothedWeights.filter { it.value > 0.3f }.keys.ifEmpty { setOf(NoiseGenerator.NoiseType.DEEP_SPACE) }
-                } else {
-                    noiseGenerator.setModes(manualModes)
-                    manualModes
-                }
-
-                val modeNames = finalModes.joinToString(", ") { getString(it.resId) }
-                val message = if (!isAutoMode) {
-                    getString(R.string.manual_masking, modeNames)
-                } else if (label.isNotEmpty()) {
-                    getString(R.string.status_detected, label) + " - " + modeNames
-                } else {
-                    getString(R.string.ambient_masking, modeNames)
-                }
-                
-                updateNotification(message)
-                sendUpdateToUI(label, modeNames, amplitude, db.toInt(), remainingSeconds, isAutoMode)
+                processAudioData(classifier, record)
             }
-        }, 0, 1000)
+        }, 0, TIMER_INTERVAL)
     }
 
-    private fun sendUpdateToUI(label: String, masking: String, amplitude: Float, db: Int, timerSeconds: Int = -1, isAuto: Boolean = true) {
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    private fun createAudioRecord(bufferSizeInBytes: Int): AudioRecord {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val attributionContext = createAttributionContext("sound_analysis")
+            AudioRecord.Builder()
+                .setAudioSource(AudioSource.MIC)
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(SAMPLE_RATE)
+                        .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                        .build()
+                )
+                .setBufferSizeInBytes(bufferSizeInBytes)
+                .setContext(attributionContext)
+                .build()
+        } else {
+            AudioRecord(
+                AudioSource.MIC,
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufferSizeInBytes
+            )
+        }
+    }
+
+    private fun processAudioData(classifier: AudioClassifier, record: AudioRecord) {
+        val audioData = AudioData.create(
+            AudioData.AudioDataFormat.builder()
+                .setNumOfChannels(1)
+                .setSampleRate(SAMPLE_RATE.toFloat())
+                .build(),
+            SAMPLE_COUNT
+        )
+
+        val loadedSamples = audioData.load(record)
+        if (loadedSamples <= 0) return
+
+        val floatArray = audioData.buffer
+        val rms = calculateRMS(floatArray)
+        val db = if (rms > 0) 20 * log10(rms) + DB_OFFSET else 0.0
+
+        val results = classifier.classify(audioData)
+        val allCategories = results.classificationResults().firstOrNull()
+            ?.classifications()?.firstOrNull()?.categories()
+
+        val topResult = allCategories
+            ?.filter { it.score() > SCORE_THRESHOLD }
+            ?.filterNot { IGNORED_LABELS.contains(it.categoryName()) }
+            ?.maxByOrNull { it.score() }
+
+        val label = topResult?.categoryName() ?: ""
+        val amplitude = topResult?.score() ?: (rms.toFloat() * RMS_MULTIPLIER).coerceIn(DEFAULT_AMPLITUDE, 1.0f)
+
+        updateAudioEngine(label, db, amplitude)
+    }
+
+    private fun calculateRMS(floatArray: FloatArray): Double {
+        var sum = 0.0
+        for (sample in floatArray) {
+            sum += (sample.toDouble() * sample.toDouble())
+        }
+        return if (floatArray.isNotEmpty()) sqrt(sum / floatArray.size) else 0.0
+    }
+
+    private fun updateAudioEngine(label: String, db: Double, amplitude: Float) {
+        if (isAutoMode) {
+            val adaptiveVol = ((db - DB_THRESHOLD_LOW) / DB_RANGE).coerceIn(
+                VOL_MIN.toDouble(),
+                VOL_MAX.toDouble()
+            ).toFloat()
+            noiseGenerator.setMasterVolume(adaptiveVol)
+        } else {
+            noiseGenerator.setMasterVolume(VOL_MANUAL)
+        }
+
+        val finalModes = if (isAutoMode) {
+            applyAutoModes(label)
+        } else {
+            noiseGenerator.setModes(manualModes)
+            manualModes
+        }
+
+        val modeNames = finalModes.joinToString(", ") { getString(it.resId) }
+        val message = when {
+            !isAutoMode -> getString(R.string.manual_masking, modeNames)
+            label.isNotEmpty() -> getString(R.string.status_detected, label) + " - " + modeNames
+            else -> getString(R.string.ambient_masking, modeNames)
+        }
+
+        updateNotification(message)
+        sendUpdateToUI(
+            AnalysisUpdate(
+                label,
+                modeNames,
+                amplitude,
+                db.toInt(),
+                remainingSeconds,
+                isAutoMode
+            )
+        )
+    }
+
+    private fun applyAutoModes(label: String): Set<NoiseGenerator.NoiseType> {
+        val suggestion = getNoiseTypeForLabel(label)
+        val targets = NoiseGenerator.NoiseType.entries.associateWith { TARGET_MIN }.toMutableMap()
+        targets[NoiseGenerator.NoiseType.DEEP_SPACE] = TARGET_BACKGROUND
+
+        if (suggestion != null) {
+            targets[suggestion] = TARGET_DETECTED
+        } else {
+            targets[NoiseGenerator.NoiseType.DEEP_SPACE] = TARGET_DEFAULT
+        }
+
+        NoiseGenerator.NoiseType.entries.forEach { type ->
+            val current = smoothedWeights[type] ?: 0f
+            val target = targets[type] ?: 0f
+            smoothedWeights[type] = (target * smoothingFactor) + (current * (1f - smoothingFactor))
+        }
+
+        noiseGenerator.setWeightedModes(smoothedWeights)
+        return smoothedWeights.filter { it.value > AUTO_MODE_THRESHOLD }.keys.ifEmpty { setOf(NoiseGenerator.NoiseType.DEEP_SPACE) }
+    }
+
+    private fun sendUpdateToUI(update: AnalysisUpdate) {
         val intent = Intent("SoundAnalysisUpdate").apply {
             setPackage(packageName)
-            putExtra("label", label)
-            putExtra("masking", masking)
-            putExtra("amplitude", amplitude)
-            putExtra("db", db)
-            putExtra("timer_seconds", timerSeconds)
-            putExtra("is_auto", isAuto)
+            putExtra("label", update.label)
+            putExtra("masking", update.masking)
+            putExtra("amplitude", update.amplitude)
+            putExtra("db", update.db)
+            putExtra("timer_seconds", update.timerSeconds)
+            putExtra("is_auto", update.isAuto)
         }
         sendBroadcast(intent)
     }
@@ -394,7 +437,11 @@ class SoundAnalysisService : LifecycleService() {
             .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, getString(R.string.btn_stop), stopPendingIntent)
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                getString(R.string.btn_stop),
+                stopPendingIntent
+            )
             .build()
     }
 
